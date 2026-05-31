@@ -1,0 +1,155 @@
+/*
+ * facecapture-sdk
+ * ------------------------------------------------------------------
+ * Aggregates the standalone face-capture stack (MNN inference +
+ * OpenSeeFace-style post-processing) into a single AAR that can be
+ * consumed by any Android app without pulling Live2D or UI code.
+ *
+ * Module composition (re-exported via `api`):
+ *   - :MediapipeFaceLandmark   MNN-based 478-point detector + JNI + libMNN*.so
+ *   - :OpenSeeFaceProcess      ARKit BlendShape extractor, head pose, blink curve, smoothing
+ *   - :CommonData              Shared data classes (Point3D, ARKitBlendShapes, HeadPose, etc.)
+ *
+ * Publishing modes (see README.md for full guide):
+ *   1) Default (this file): publishes 4 AARs via maven-publish; consumers add
+ *      a single `implementation` and Gradle resolves all 4 transitively.
+ *   2) Fat-AAR (optional): apply kezong/fat-aar-android to merge dependencies
+ *      into one self-contained AAR. Snippet provided at the bottom of this file.
+ */
+
+plugins {
+    alias(libs.plugins.android.library)
+    alias(libs.plugins.kotlin.android)
+    id 'maven-publish'
+}
+
+// ---------- Coordinate / version ----------
+ext {
+    sdkGroupId    = 'io.github.virtualfacecapture'
+    sdkArtifactId = 'facecapture-mnn'
+    sdkVersion    = '0.1.0'
+}
+
+android {
+    namespace 'com.facecapture.sdk'
+    compileSdk rootProject.ext.compileSdkVersion
+
+    defaultConfig {
+        minSdk rootProject.ext.minSdkVersion
+        ndkVersion ndkVer
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles "consumer-rules.pro"
+        ndk {
+            // Aligned with upstream native modules.
+            // Add other ABIs only after rebuilding ThirdParty/MNN for them.
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+    kotlinOptions {
+        jvmTarget = '11'
+    }
+
+    // Enable maven-publish for the `release` variant + source/javadoc jars.
+    publishing {
+        singleVariant('release') {
+            withSourcesJar()
+            withJavadocJar()
+        }
+    }
+}
+
+dependencies {
+    // `api` so consumers see ARKitBlendShapes / Point3D / FaceCapturePipeline
+    // without having to add the upstream modules themselves.
+    api project(':MediapipeFaceLandmark')
+    api project(':OpenSeeFaceProcess')
+    api project(':CommonData')
+
+    implementation libs.androidx.core.ktx
+    implementation libs.androidx.appcompat
+    implementation libs.kotlinx.coroutines.android
+
+    testImplementation libs.junit
+    androidTestImplementation libs.androidx.junit
+    androidTestImplementation libs.androidx.espresso.core
+}
+
+// ---------- Maven publication ----------
+afterEvaluate {
+    publishing {
+        publications {
+            release(MavenPublication) {
+                from components.release
+                groupId    = project.ext.sdkGroupId
+                artifactId = project.ext.sdkArtifactId
+                version    = project.ext.sdkVersion
+
+                pom {
+                    name        = 'FaceCapture-MNN SDK'
+                    description = 'Standalone Android face-capture pipeline (MediaPipe ' +
+                                  'topology + MNN inference + OpenSeeFace-style ' +
+                                  'post-processing). Outputs 478 landmarks and ARKit ' +
+                                  '52 BlendShapes from a camera frame.'
+                    url         = 'https://github.com/<your-org>/VirtualFaceCapture-MNN'
+                    licenses {
+                        license {
+                            name = 'Apache-2.0'
+                            url  = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+                        }
+                    }
+                }
+            }
+        }
+
+        repositories {
+            // Local file repository: ./build/repo
+            // Run: ./gradlew :facecapture-sdk:publishReleasePublicationToLocalRepoRepository
+            maven {
+                name = 'LocalRepo'
+                url  = layout.buildDirectory.dir('repo')
+            }
+
+            // Uncomment & fill in to publish to GitHub Packages / Sonatype:
+            // maven {
+            //     name = 'GitHubPackages'
+            //     url  = uri('https://maven.pkg.github.com/<owner>/VirtualFaceCapture-MNN')
+            //     credentials {
+            //         username = System.getenv('GITHUB_ACTOR')
+            //         password = System.getenv('GITHUB_TOKEN')
+            //     }
+            // }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------
+ * Optional: produce ONE fat AAR that embeds the 3 sub-modules.
+ * Requires plugin: id 'com.kezong.fat-aar' version '1.3.8'
+ * Steps:
+ *   1) In root build.gradle add:
+ *        classpath 'com.kezong:fat-aar:1.3.8'
+ *   2) Replace the `api project(...)` lines above with `embed project(...)`:
+ *        embed project(':MediapipeFaceLandmark')
+ *        embed project(':OpenSeeFaceProcess')
+ *        embed project(':CommonData')
+ *   3) Apply the plugin at the top of THIS file:
+ *        apply plugin: 'com.kezong.fat-aar'
+ *   4) Build: ./gradlew :facecapture-sdk:assembleRelease
+ *      Output: facecapture-sdk/build/outputs/aar/facecapture-sdk-release.aar
+ *
+ * Trade-offs: fat-aar simplifies distribution to a single file, but is a
+ * 3rd-party plugin that occasionally lags behind newer AGP/Kotlin releases.
+ * For maven-publish workflows the default (4 AARs) is safer.
+ * ------------------------------------------------------------------ */

@@ -1,0 +1,34 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "sensei.moc3",
+		"Textures": [
+			"sensei.4096/texture_00.png"
+		],
+		"Physics": "sensei.physics3.json",
+		"DisplayInfo": "sensei.cdi3.json",
+		"Motions": {
+			"": [
+				{
+					"File": "Scene1.motion3.json"
+				},
+				{
+					"File": "Scene2.motion3.json"
+				}
+			]
+		}
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": []
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": []
+		}
+	],
+	"HitAreas": []
+}

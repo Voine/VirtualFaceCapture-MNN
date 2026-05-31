@@ -1,0 +1,1 @@
+{"FileReferences":{"DisplayInfo":"zz.cdi3.json","Expressions":[],"Moc":"zz.moc3","Motions":{"Motion":[]},"Physics":"zz.physics3.json","Textures":["zz.2048/texture_00.png"]},"Groups":[{"Ids":[],"Name":"LipSync","Target":"Parameter"},{"Ids":[],"Name":"EyeBlink","Target":"Parameter"}],"Version":3}
