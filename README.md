@@ -1,5 +1,7 @@
 # VirtualFaceCapture-MNN
 > ✨ Android 端虚拟角色面捕驱动系统，推理框架基于 [alibaba-MNN](https://github.com/alibaba/MNN).
+
+> 🌐 English README: [README.en.md](./README.en.md)
 ___
 
 ## 🧠 简介
