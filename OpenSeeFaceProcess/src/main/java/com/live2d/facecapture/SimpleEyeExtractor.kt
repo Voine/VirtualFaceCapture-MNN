@@ -1,10 +1,12 @@
 package com.live2d.facecapture
 
+import android.os.SystemClock
 import android.util.Log
 import com.example.commondata.ARKitBlendShapes
+import com.example.commondata.CALIBRATION_DURATION_MS
 import com.example.commondata.EyePoints
-import com.example.commondata.FRAME_COUNT_CALIBRATE
 import com.example.commondata.HeadPose
+import com.example.commondata.MIN_CALIBRATION_FRAMES
 import kotlin.math.*
 
 /**
@@ -57,6 +59,8 @@ class SimpleEyeExtractor {
         var minEAR: Float = Float.MAX_VALUE,
         var maxEAR: Float = Float.MIN_VALUE,
         var frameCount: Int = 0,
+        // 校准窗口起始时间（uptimeMillis），用于按时长触发结束
+        var startTimestampMs: Long = 0L,
 
         // 校准结果
         var meanEAR: Float = 0f,
@@ -71,11 +75,24 @@ class SimpleEyeExtractor {
          * 添加一帧 EAR 数据
          */
         fun addFrame(ear: Float) {
+            if (frameCount == 0) {
+                startTimestampMs = SystemClock.uptimeMillis()
+            }
             sumEAR += ear
             sumSquaredEAR += ear * ear
             minEAR = min(minEAR, ear)
             maxEAR = max(maxEAR, ear)
             frameCount++
+        }
+
+        /**
+         * 校准窗口是否已经收集够样本（时长 + 最小帧数 双门限）。
+         * 见 [CALIBRATION_DURATION_MS] / [MIN_CALIBRATION_FRAMES] 的说明。
+         */
+        fun isWindowReady(): Boolean {
+            if (frameCount < MIN_CALIBRATION_FRAMES) return false
+            val elapsed = SystemClock.uptimeMillis() - startTimestampMs
+            return elapsed >= CALIBRATION_DURATION_MS
         }
 
         /**
@@ -149,6 +166,7 @@ class SimpleEyeExtractor {
             minEAR = Float.MAX_VALUE
             maxEAR = Float.MIN_VALUE
             frameCount = 0
+            startTimestampMs = 0L
             meanEAR = 0f
             stdEAR = 0f
             calibratedClosedRatio = DEFAULT_EYE_CLOSED_RATIO
@@ -161,12 +179,6 @@ class SimpleEyeExtractor {
     // 左右眼分别校准
     val imageLeftEyeCalibration = EyeCalibrationData()
     val imageRightEyeCalibration = EyeCalibrationData()
-    
-    /**
-     * 校准帧数
-     * 重置后的前 N 帧用于校准
-     */
-    var calibrationFrames: Int = FRAME_COUNT_CALIBRATE
 
     /**
      * 是否正在校准期
@@ -877,7 +889,7 @@ class SimpleEyeExtractor {
         // 并在校准完成时记录当时的头部姿态
         if (!imageLeftEyeCalibration.isCalibrated) {
             imageLeftEyeCalibration.addFrame(imageLeftEARRaw)
-            if (imageLeftEyeCalibration.frameCount >= calibrationFrames) {
+            if (imageLeftEyeCalibration.isWindowReady()) {
                 imageLeftEyeCalibration.finishCalibration()
                 // 记录校准时的姿态
                 if (headPose != null) {
@@ -893,7 +905,7 @@ class SimpleEyeExtractor {
         }
         if (!imageRightEyeCalibration.isCalibrated) {
             imageRightEyeCalibration.addFrame(imageRightEARRaw)
-            if (imageRightEyeCalibration.frameCount >= calibrationFrames) {
+            if (imageRightEyeCalibration.isWindowReady()) {
                 imageRightEyeCalibration.finishCalibration()
             }
         }

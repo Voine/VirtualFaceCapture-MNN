@@ -1,10 +1,12 @@
 package com.live2d.facecapture
 
+import android.os.SystemClock
 import android.util.Log
 import com.example.commondata.ARKitBlendShapes
-import com.example.commondata.FRAME_COUNT_CALIBRATE
+import com.example.commondata.CALIBRATION_DURATION_MS
 import com.example.commondata.FaceKeyPoints
 import com.example.commondata.HeadPose
+import com.example.commondata.MIN_CALIBRATION_FRAMES
 import com.example.commondata.Point3D
 import kotlin.math.abs
 import kotlin.math.max
@@ -83,6 +85,8 @@ class SimpleSmileExtractor {
         var sumSquaredLeftFeature: Float = 0f,
         var sumSquaredRightFeature: Float = 0f,
         var frameCount: Int = 0,
+        // 校准窗口起始时间（uptimeMillis），用于按时长触发结束
+        var startTimestampMs: Long = 0L,
         
         // 校准结果：中性表情时的特征基线
         var baselineLeftFeature: Float = 0f,
@@ -100,11 +104,23 @@ class SimpleSmileExtractor {
          * 添加一帧特征数据
          */
         fun addFrame(leftFeature: Float, rightFeature: Float) {
+            if (frameCount == 0) {
+                startTimestampMs = SystemClock.uptimeMillis()
+            }
             sumLeftFeature += leftFeature
             sumRightFeature += rightFeature
             sumSquaredLeftFeature += leftFeature * leftFeature
             sumSquaredRightFeature += rightFeature * rightFeature
             frameCount++
+        }
+
+        /**
+         * 校准窗口是否已经收集够样本（时长 + 最小帧数 双门限）。
+         */
+        fun isWindowReady(): Boolean {
+            if (frameCount < MIN_CALIBRATION_FRAMES) return false
+            val elapsed = SystemClock.uptimeMillis() - startTimestampMs
+            return elapsed >= CALIBRATION_DURATION_MS
         }
         
         /**
@@ -164,6 +180,7 @@ class SimpleSmileExtractor {
             sumSquaredLeftFeature = 0f
             sumSquaredRightFeature = 0f
             frameCount = 0
+            startTimestampMs = 0L
             baselineLeftFeature = 0f
             baselineRightFeature = 0f
             stdLeftFeature = 0f
@@ -175,12 +192,7 @@ class SimpleSmileExtractor {
     }
     
     val calibration = SmileCalibrationData()
-    
-    /**
-     * 校准帧数
-     */
-    var calibrationFrames: Int = FRAME_COUNT_CALIBRATE
-    
+
     /**
      * 是否正在校准期
      */
@@ -304,7 +316,7 @@ class SimpleSmileExtractor {
         // 3. 校准期收集数据（使用原始特征）
         if (!calibration.isCalibrated) {
             calibration.addFrame(rawLeftFeature, rawRightFeature)
-            if (calibration.frameCount >= calibrationFrames) {
+            if (calibration.isWindowReady()) {
                 calibration.finishCalibration()
                 // 设置校准姿态
                 if (headPose != null) {

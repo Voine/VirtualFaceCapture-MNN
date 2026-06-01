@@ -363,4 +363,23 @@ data class HeadPose(
     val roll: Float = 0f    // 翻滚角
 )
 
-const val FRAME_COUNT_CALIBRATE = 20
+/**
+ * 校准窗口的时长（毫秒）。
+ *
+ * 旧实现按固定 20 帧收集校准数据，在 release 包跑到 ~60 FPS 时会在 ~330ms 内就完成校准，
+ * 收集到的样本可能仍处于摄像头自动曝光 / 用户落座过渡阶段，导致基线不稳。
+ * 改为按时间窗口收集后，无论手机性能 / 帧率高低，校准窗口都覆盖大致相同的时长。
+ *
+ * - 60 FPS → 约 60 帧
+ * - 30 FPS → 约 30 帧
+ * - 极低 FPS（< 10）也至少要凑够 [MIN_CALIBRATION_FRAMES] 帧才会结束
+ */
+const val CALIBRATION_DURATION_MS: Long = 1000L
+
+/**
+ * 校准窗口需要的最小帧数兜底。
+ *
+ * 即便 [CALIBRATION_DURATION_MS] 已到时间，如果实际收集到的样本数少于这个阈值
+ * （例如极卡顿的低端机），也会继续等到达到该数量再完成校准，避免基线被一两帧噪声主导。
+ */
+const val MIN_CALIBRATION_FRAMES: Int = 10

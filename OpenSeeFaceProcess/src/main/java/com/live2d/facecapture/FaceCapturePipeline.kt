@@ -1,10 +1,12 @@
 package com.live2d.facecapture
 
+import android.os.SystemClock
 import android.util.Log
 import com.example.commondata.ARKitBlendShapes
-import com.example.commondata.FRAME_COUNT_CALIBRATE
+import com.example.commondata.CALIBRATION_DURATION_MS
 import com.example.commondata.FaceLandmarkIndices
 import com.example.commondata.HeadPose
+import com.example.commondata.MIN_CALIBRATION_FRAMES
 import com.example.commondata.Point3D
 
 
@@ -26,7 +28,12 @@ class FaceCapturePipeline {
     private var isPoseCalibrated: Boolean = false
 
     // 用于自动校准的累积数据
+    //
+    // 校准窗口现在按"时长 + 最小帧数"双门限触发，而不是写死的帧数 —— 这样无论手机
+    // 性能 / 实际帧率高低，校准都基于大致相同的真实时间窗口，不会在 release 包飙到
+    // 60 FPS 时只用 ~330ms 就草草结束。
     private var calibrationFrameCount: Int = 0
+    private var calibrationStartTimestampMs: Long = 0L
     private var calibrationPitchSum: Float = 0f
     private var calibrationYawSum: Float = 0f
     private var calibrationRollSum: Float = 0f
@@ -76,8 +83,11 @@ class FaceCapturePipeline {
         // 3. 提取关键点（先提取，因为校准需要用到）
         val keyPoints = FaceLandmarkIndices.extractKeyPoints(landmarks, imageWidth, imageHeight)
 
-        // 1. 自动校准姿态基线（前 N 帧取平均）
+        // 1. 自动校准姿态基线（按"时长 + 最小帧数"窗口取平均）
         if (!isPoseCalibrated) {
+            if (calibrationFrameCount == 0) {
+                calibrationStartTimestampMs = SystemClock.uptimeMillis()
+            }
             calibrationFrameCount++
             calibrationPitchSum += rawPitch
             calibrationYawSum += rawYaw
@@ -86,19 +96,26 @@ class FaceCapturePipeline {
             // 累积点位数据
             calibrationLandmarksAccumulator.add(landmarks)
 
-            if (calibrationFrameCount >= FRAME_COUNT_CALIBRATE) {
-                // 计算姿态平均值
-                baselinePitch = calibrationPitchSum / FRAME_COUNT_CALIBRATE
-                baselineYaw = calibrationYawSum / FRAME_COUNT_CALIBRATE
-                baselineRoll = calibrationRollSum / FRAME_COUNT_CALIBRATE
+            val elapsedMs = SystemClock.uptimeMillis() - calibrationStartTimestampMs
+            val windowReady = elapsedMs >= CALIBRATION_DURATION_MS &&
+                calibrationFrameCount >= MIN_CALIBRATION_FRAMES
+
+            if (windowReady) {
+                // 注意：除数必须是实际收集到的帧数，而不是任何常量 —— 在变长窗口下，
+                // 不同帧率 / 不同设备拿到的样本数都会不同。
+                val n = calibrationFrameCount.toFloat()
+                baselinePitch = calibrationPitchSum / n
+                baselineYaw = calibrationYawSum / n
+                baselineRoll = calibrationRollSum / n
                 isPoseCalibrated = true
 
                 // 使用累积的点位数据计算平均值进行校准
                 calibrateWithAccumulatedData()
 
                 Log.i("FaceCapturePipeline",
-                    "✅ Auto-calibrated: pose=(%.1f, %.1f, %.1f), using %d frames average".format(
-                        baselinePitch, baselineYaw, baselineRoll, FRAME_COUNT_CALIBRATE
+                    "✅ Auto-calibrated: pose=(%.1f, %.1f, %.1f), %d frames over %d ms".format(
+                        baselinePitch, baselineYaw, baselineRoll,
+                        calibrationFrameCount, elapsedMs
                     ))
             }
         }
@@ -132,6 +149,8 @@ class FaceCapturePipeline {
             return
         }
 
+        val accumulatedCount = calibrationLandmarksAccumulator.size
+
         // 计算平均 landmarks
         val avgLandmarks = averageLandmarks(calibrationLandmarksAccumulator)
 
@@ -148,7 +167,7 @@ class FaceCapturePipeline {
         calibrationLandmarksAccumulator.clear()
 
         Log.i("FaceCapturePipeline",
-            "✅ Expression calibrated with $FRAME_COUNT_CALIBRATE frames average landmarks")
+            "✅ Expression calibrated with $accumulatedCount frames average landmarks")
     }
 
     /**
@@ -235,6 +254,7 @@ class FaceCapturePipeline {
         baselineRoll = 0f
         isPoseCalibrated = false
         calibrationFrameCount = 0
+        calibrationStartTimestampMs = 0L
         calibrationPitchSum = 0f
         calibrationYawSum = 0f
         calibrationRollSum = 0f

@@ -1,10 +1,12 @@
 package com.live2d.facecapture
 
+import android.os.SystemClock
 import android.util.Log
 import com.example.commondata.ARKitBlendShapes
-import com.example.commondata.FRAME_COUNT_CALIBRATE
+import com.example.commondata.CALIBRATION_DURATION_MS
 import com.example.commondata.FaceKeyPoints
 import com.example.commondata.HeadPose
+import com.example.commondata.MIN_CALIBRATION_FRAMES
 import com.example.commondata.Point3D
 import kotlin.math.abs
 import kotlin.math.max
@@ -51,7 +53,9 @@ class SimpleMouthExtractor {
         var minMAR: Float = Float.MAX_VALUE,
         var maxMAR: Float = Float.MIN_VALUE,
         var frameCount: Int = 0,
-        
+        // 校准窗口起始时间（uptimeMillis），用于按时长触发结束
+        var startTimestampMs: Long = 0L,
+
         // 校准结果
         var meanMAR: Float = 0f,
         var stdMAR: Float = 0f,
@@ -64,11 +68,23 @@ class SimpleMouthExtractor {
          * 添加一帧 MAR 数据
          */
         fun addFrame(mar: Float) {
+            if (frameCount == 0) {
+                startTimestampMs = SystemClock.uptimeMillis()
+            }
             sumMAR += mar
             sumSquaredMAR += mar * mar
             minMAR = min(minMAR, mar)
             maxMAR = max(maxMAR, mar)
             frameCount++
+        }
+
+        /**
+         * 校准窗口是否已经收集够样本（时长 + 最小帧数 双门限）。
+         */
+        fun isWindowReady(): Boolean {
+            if (frameCount < MIN_CALIBRATION_FRAMES) return false
+            val elapsed = SystemClock.uptimeMillis() - startTimestampMs
+            return elapsed >= CALIBRATION_DURATION_MS
         }
         
         /**
@@ -111,6 +127,7 @@ class SimpleMouthExtractor {
             minMAR = Float.MAX_VALUE
             maxMAR = Float.MIN_VALUE
             frameCount = 0
+            startTimestampMs = 0L
             meanMAR = 0f
             stdMAR = 0f
             calibratedClosedRatio = DEFAULT_MOUTH_CLOSED_RATIO
@@ -121,12 +138,7 @@ class SimpleMouthExtractor {
     
     // 校准数据
     val mouthCalibration = MouthCalibrationData()
-    
-    /**
-     * 校准帧数
-     */
-    var calibrationFrames: Int = FRAME_COUNT_CALIBRATE
-    
+
     /**
      * 是否正在校准期
      */
@@ -249,7 +261,7 @@ class SimpleMouthExtractor {
         // 3. 校准期收集数据（使用原始 MAR）
         if (!mouthCalibration.isCalibrated) {
             mouthCalibration.addFrame(rawMAR)
-            if (mouthCalibration.frameCount >= calibrationFrames) {
+            if (mouthCalibration.isWindowReady()) {
                 mouthCalibration.finishCalibration()
             }
         }

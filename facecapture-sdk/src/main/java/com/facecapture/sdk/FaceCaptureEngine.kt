@@ -136,8 +136,15 @@ interface FaceCaptureEngine {
  * @property numThreads          MNN thread count for inference (1..4).
  * @property enableBlinkCurve    Apply the natural-blink curve post-processor
  *                               (recommended for Live2D / VTuber use).
- * @property calibrationFrames   Number of initial frames used to learn the
- *                               neutral baseline (head pose + expression).
+ * @property calibrationDurationMs Duration (ms) of the initial neutral-baseline
+ *                               calibration window. The engine collects every
+ *                               processed frame inside this window and averages
+ *                               them to learn the pose / expression baseline.
+ *                               Using a time window (instead of a fixed frame
+ *                               count) keeps the calibration quality consistent
+ *                               regardless of device performance — a 60 FPS
+ *                               release build and a 30 FPS debug build both
+ *                               calibrate over the same wall-clock time.
  * @property smoothing           Temporal smoothing filter type.
  */
 data class FaceCaptureConfig(
@@ -145,7 +152,7 @@ data class FaceCaptureConfig(
     val externalModelDir: String? = null,
     val numThreads: Int = 2,
     val enableBlinkCurve: Boolean = true,
-    val calibrationFrames: Int = 30,
+    val calibrationDurationMs: Long = com.example.commondata.CALIBRATION_DURATION_MS,
     val smoothing: SmoothingMode = SmoothingMode.TIME_BASED_EMA,
 )
 
