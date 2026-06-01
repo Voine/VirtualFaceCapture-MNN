@@ -106,16 +106,26 @@ class PipelineFaceTracker(private val context: Context) {
     @OptIn(ExperimentalCoroutinesApi::class)
     private val processingDispatcher = Dispatchers.Default.limitedParallelism(1)
 
-    private val frameChannel = Channel<FrameData>(
+    // Channels are recreated on every start() because Channel.close() is one-shot.
+    // Keeping them mutable also lets stop() drop any in-flight frames (whose
+    // backing ByteBuffers point into Camera2 Image planes that get freed by
+    // stopCamera()), preventing a use-after-free crash in JNI on the next start.
+    private var frameChannel: Channel<FrameData> = newFrameChannel()
+    private var landmarkFrameChannel: Channel<FrameData> = newFrameChannel()
+    private var landmarkChannel: Channel<LandmarkData> = newLandmarkChannel()
+
+    private fun newFrameChannel() = Channel<FrameData>(
         capacity = DETECTION_CHANNEL_CAPACITY,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
-    private val landmarkFrameChannel = Channel<FrameData>(
-        capacity = LANDMARK_CHANNEL_CAPACITY,
+
+    private fun newLandmarkChannel() = Channel<LandmarkData>(
+        capacity = PROCESSING_CHANNEL_CAPACITY,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
-    private val landmarkChannel = Channel<LandmarkData>(
-        capacity = PROCESSING_CHANNEL_CAPACITY,
+
+    private fun newYuvChannel(capacity: Int) = Channel<YuvFrameDataInternal>(
+        capacity = capacity,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
@@ -155,6 +165,40 @@ class PipelineFaceTracker(private val context: Context) {
      */
     var onFaceCaptureFrame: ((ARKitBlendShapes, HeadPoseData) -> Unit)? = null
 
+    /**
+     * 原子的“完整结果”回调：在同一帧内同时携带
+     *
+     *  - **原始感知层**：478 个 MediaPipe FaceMesh 关键点（归一化坐标）、对应的图像
+     *    宽高、检测框、Landmark 模型的 presence score；
+     *  - **后处理层**：原始/相对头部姿态、52 维 ARKit BlendShape、是否仍处于
+     *    校准窗口、当前 FPS。
+     *
+     * 这条回调是 SDK 对外暴露的“一站式”结果通道，[FaceCaptureEngine] 即基于此封装。
+     * 上层调用方如果只关心后处理结果（如直接驱动 Live2D），订阅 [onFaceCaptureFrame]
+     * 即可；如果需要拿到原始点位做自定义渲染 / 调试 / 二次后处理，请订阅本回调。
+     *
+     * 与多路独立回调相比，本回调可保证「关键点 / 姿态 / BlendShape」三者来自同一帧，
+     * 不会出现错位。
+     */
+    var onFaceCaptureResult: ((SdkFaceCaptureFrame) -> Unit)? = null
+
+    /**
+     * 同帧原子的全量数据包。字段语义详见 [FaceCaptureResult]（SDK Facade 即由本类映射）。
+     */
+    data class SdkFaceCaptureFrame(
+        val frameId: Long,
+        val landmarks: List<Point3D>,
+        val imageWidth: Int,
+        val imageHeight: Int,
+        val detectionBox: DetectionBox,
+        val rawHeadPose: HeadPoseData,
+        val relativeHeadPose: HeadPoseData,
+        val blendShapes: ARKitBlendShapes,
+        val presenceScore: Float,
+        val isCalibrating: Boolean,
+        val fps: Float,
+    )
+
     // ============================================================================
     // Internal data classes
     // ============================================================================
@@ -180,20 +224,14 @@ class PipelineFaceTracker(private val context: Context) {
         val height: Int,
         val timestamp: Long,
         val headPose: Triple<Float, Float, Float>?,
+        val presenceScore: Float = 1f,
     )
 
     /** Use direct YUV processing (recommended; avoids Kotlin-side YUV->RGB conversion). */
     var useDirectYuvMode: Boolean = true
 
-    private val yuvFrameChannel = Channel<YuvFrameDataInternal>(
-        capacity = DETECTION_CHANNEL_CAPACITY,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST,
-    )
-
-    private val yuvLandmarkFrameChannel = Channel<YuvFrameDataInternal>(
-        capacity = LANDMARK_CHANNEL_CAPACITY,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST,
-    )
+    private var yuvFrameChannel: Channel<YuvFrameDataInternal> = newYuvChannel(DETECTION_CHANNEL_CAPACITY)
+    private var yuvLandmarkFrameChannel: Channel<YuvFrameDataInternal> = newYuvChannel(LANDMARK_CHANNEL_CAPACITY)
 
     // ============================================================================
     // Lifecycle
@@ -221,6 +259,18 @@ class PipelineFaceTracker(private val context: Context) {
         }
 
         Log.i(TAG, "Starting parallel pipeline face tracker (YUV direct mode: $useDirectYuvMode)...")
+
+        // Recreate ALL channels for this run. A closed Channel cannot be reused,
+        // and any frame left in the previous run's YUV channels would carry a
+        // ByteBuffer pointing into a now-released Camera2 Image plane -> crash.
+        frameChannel = newFrameChannel()
+        landmarkFrameChannel = newFrameChannel()
+        landmarkChannel = newLandmarkChannel()
+        yuvFrameChannel = newYuvChannel(DETECTION_CHANNEL_CAPACITY)
+        yuvLandmarkFrameChannel = newYuvChannel(LANDMARK_CHANNEL_CAPACITY)
+
+        // Drop any stale face box from a previous session.
+        synchronized(faceBoxLock) { lastFaceBox = null }
 
         if (useDirectYuvMode) {
             startYuvFaceDetectionStage()
@@ -295,10 +345,17 @@ class PipelineFaceTracker(private val context: Context) {
     fun stop() {
         if (!isRunning.getAndSet(false)) return
         Log.i(TAG, "Stopping pipeline face tracker...")
+        // IMPORTANT: stop the camera FIRST so no further frames get enqueued,
+        // then close every channel. Closing the YUV channels here is critical:
+        // their elements wrap Camera2 Image planes that become invalid the
+        // moment stopCamera() releases the ImageReader. Leaving stale items in
+        // the channel would cause use-after-free on the next start().
         camera2Manager.stopCamera()
         frameChannel.close()
         landmarkFrameChannel.close()
         landmarkChannel.close()
+        yuvFrameChannel.close()
+        yuvLandmarkFrameChannel.close()
     }
 
     fun release() {
@@ -486,6 +543,7 @@ class PipelineFaceTracker(private val context: Context) {
                             height = yuvData.rotatedHeight,
                             timestamp = frame.timestamp,
                             headPose = headPose,
+                            presenceScore = presenceScore,
                         )
 
                         landmarkOutputCount.incrementAndGet()
@@ -543,6 +601,9 @@ class PipelineFaceTracker(private val context: Context) {
                     val headPoseData = HeadPoseData(
                         relativePose.pitch, relativePose.yaw, relativePose.roll,
                     )
+                    val rawPoseData = HeadPoseData(
+                        result.rawPose.pitch, result.rawPose.yaw, result.rawPose.roll,
+                    )
                     lastHeadPose = headPoseData
 
                     updateFps()
@@ -580,6 +641,25 @@ class PipelineFaceTracker(private val context: Context) {
                             headPose = currentHeadPoseData,
                             imageWidth = currentWidth,
                             imageHeight = currentHeight,
+                        )
+
+                        // SDK-facing atomic snapshot: raw landmarks + post-processed
+                        // BlendShape / head-pose in a single payload, guaranteed to
+                        // belong to the same frame.
+                        onFaceCaptureResult?.invoke(
+                            SdkFaceCaptureFrame(
+                                frameId = data.frameId,
+                                landmarks = currentLandmarks,
+                                imageWidth = currentWidth,
+                                imageHeight = currentHeight,
+                                detectionBox = detectionBox,
+                                rawHeadPose = rawPoseData,
+                                relativeHeadPose = currentHeadPoseData,
+                                blendShapes = currentBlendShapes,
+                                presenceScore = data.presenceScore,
+                                isCalibrating = result.isCalibrating,
+                                fps = currentFps,
+                            )
                         )
 
                         onBlendShapesUpdate?.invoke(currentBlendShapes)

@@ -39,28 +39,32 @@ internal class FaceCaptureEngineImpl : FaceCaptureEngine {
         // BlinkCurveProcessor toggle
         t.blinkCurveProcessor.isEnabled = config.enableBlinkCurve
 
-        // Bridge tracker → unified FaceCaptureResult
-        var latestFps = 0f
-        t.onFpsUpdate = { latestFps = it }
-
-        var latestPresence = 1.0f          // placeholder; pipeline reports presence internally
-        var latestCalibrating = true
-        t.onCalibrationStatusUpdate = { latestCalibrating = it }
-
-        t.onFaceCaptureFrame = { bs, pose ->
+        // Subscribe to the atomic SDK-facing callback so that landmarks (raw
+        // perception output) and BlendShape/head-pose (post-processed) always
+        // come from the same frame.
+        t.onFaceCaptureResult = { snap ->
             val result = FaceCaptureResult(
-                frameId = frameCounter.incrementAndGet(),
-                landmarks = emptyList(),    // Filled by onVisualizationUpdate below
-                rawHeadPose = com.example.commondata.HeadPose(pose.pitch, pose.yaw, pose.roll),
-                relativeHeadPose = com.example.commondata.HeadPose(pose.pitch, pose.yaw, pose.roll),
-                blendShapes = bs,
-                presenceScore = latestPresence,
-                isCalibrating = latestCalibrating,
-                fps = latestFps,
+                frameId = snap.frameId,
+                landmarks = snap.landmarks,
+                imageWidth = snap.imageWidth,
+                imageHeight = snap.imageHeight,
+                detectionBox = snap.detectionBox,
+                rawHeadPose = com.example.commondata.HeadPose(
+                    snap.rawHeadPose.pitch, snap.rawHeadPose.yaw, snap.rawHeadPose.roll,
+                ),
+                relativeHeadPose = com.example.commondata.HeadPose(
+                    snap.relativeHeadPose.pitch,
+                    snap.relativeHeadPose.yaw,
+                    snap.relativeHeadPose.roll,
+                ),
+                blendShapes = snap.blendShapes,
+                presenceScore = snap.presenceScore,
+                isCalibrating = snap.isCalibrating,
+                fps = snap.fps,
             )
-            // The visualization callback carries landmarks; we merge both via a
-            // small atomic merge below. For now emit BS+pose; landmark consumers
-            // can subscribe to PipelineFaceTracker.onVisualizationUpdate directly.
+            // frameCounter kept for back-compat consumers that relied on a
+            // strictly engine-local id; not used in the emitted result.
+            frameCounter.incrementAndGet()
             listener?.invoke(result)
         }
 

@@ -2,6 +2,7 @@ package com.facecapture.sdk
 
 import android.content.Context
 import android.media.Image
+import com.example.commondata.DetectionBox
 import com.example.commondata.HeadPose
 import com.example.commondata.ARKitBlendShapes
 import com.example.commondata.Point3D
@@ -36,9 +37,17 @@ import java.nio.ByteBuffer
  * val engine = FaceCaptureEngine.create()
  * engine.initialize(context)
  * engine.setResultListener { result ->
- *     // result.landmarks: 478 raw MediaPipe points
- *     // result.blendShapes: 52 ARKit BlendShapes (smoothed)
- *     // result.relativeHeadPose: pitch/yaw/roll relative to calibrated baseline
+ *     // --- Raw perception layer (MediaPipe FaceLandmarker on MNN) ---
+ *     val rawLandmarks = result.landmarks          // 478 normalized 3D points
+ *     val imgW         = result.imageWidth         // size of the frame those
+ *     val imgH         = result.imageHeight        //   landmarks live in
+ *     val faceBox      = result.detectionBox       // tight bbox over landmarks
+ *     val presence     = result.presenceScore      // model confidence [0,1]
+ *
+ *     // --- Post-processed layer (OpenSeeFace-style stack) ---
+ *     val blendShapes  = result.blendShapes        // 52 ARKit BlendShapes, smoothed
+ *     val rawPose      = result.rawHeadPose        // raw pitch/yaw/roll
+ *     val relPose      = result.relativeHeadPose   // baseline-subtracted
  * }
  *
  * // From Camera2 / CameraX ImageAnalysis:
@@ -165,19 +174,51 @@ data class CameraFrame(
 /**
  * Per-frame inference + post-processing result.
  *
- * @property landmarks         Raw 478 MediaPipe FaceMesh points (image space).
- * @property rawHeadPose       Head pose computed directly from landmarks.
- * @property relativeHeadPose  Head pose with the calibrated baseline subtracted;
- *                             this is what you typically feed to a downstream
- *                             avatar/Live2D rig.
- * @property blendShapes       Full set of 52 ARKit BlendShape values, smoothed.
- * @property presenceScore     Face-presence confidence in `[0, 1]`.
- * @property isCalibrating     `true` while still inside the calibration window.
- * @property fps               Rolling inference FPS reported by the engine.
+ * The SDK deliberately exposes **both** layers of the pipeline so that
+ * integrators are free to pick what they need:
+ *
+ * - [landmarks] / [imageWidth] / [imageHeight] / [detectionBox] / [presenceScore]
+ *   come straight out of the MediaPipe-FaceLandmarker MNN model
+ *   (Detection → Landmark). They are the *raw* perception output —
+ *   useful for custom rigs, debug overlays, or running your own post-processing.
+ *
+ * - [rawHeadPose] / [relativeHeadPose] / [blendShapes] are the *post-processed*
+ *   outputs of the OpenSeeFace-style stack (calibration, smoothing,
+ *   blink-curve, ARKit-52 solver). These are what you typically forward to
+ *   a Live2D / VRM / VTuber rig.
+ *
+ * All fields belong to the **same frame** ([frameId]), guaranteed atomic
+ * by the engine — landmarks will never go out of sync with blendshapes.
+ *
+ * @property frameId            Monotonically increasing frame id.
+ * @property landmarks          Raw 478 MediaPipe FaceMesh points. Coordinates
+ *                              are normalized to `[0, 1]` over
+ *                              ([imageWidth] x [imageHeight]); `z` is the
+ *                              relative depth produced by the model.
+ * @property imageWidth         Width  (px) of the image the landmarks were
+ *                              produced on (after camera rotation).
+ * @property imageHeight        Height (px) of the image the landmarks were
+ *                              produced on (after camera rotation).
+ * @property detectionBox       Tight bounding box around [landmarks]
+ *                              (normalized), useful for cropping / overlays.
+ * @property rawHeadPose        Head pose computed directly from landmarks
+ *                              (degrees, no baseline subtraction).
+ * @property relativeHeadPose   Head pose with the calibrated baseline
+ *                              subtracted; this is what you typically feed
+ *                              to a downstream avatar/Live2D rig.
+ * @property blendShapes        Full set of 52 ARKit BlendShape values,
+ *                              already smoothed + blink-curve-processed.
+ * @property presenceScore      Face-presence confidence in `[0, 1]`,
+ *                              reported by the Landmark model.
+ * @property isCalibrating      `true` while still inside the calibration window.
+ * @property fps                Rolling inference FPS reported by the engine.
  */
 data class FaceCaptureResult(
     val frameId: Long,
     val landmarks: List<Point3D>,
+    val imageWidth: Int,
+    val imageHeight: Int,
+    val detectionBox: DetectionBox,
     val rawHeadPose: HeadPose,
     val relativeHeadPose: HeadPose,
     val blendShapes: ARKitBlendShapes,
